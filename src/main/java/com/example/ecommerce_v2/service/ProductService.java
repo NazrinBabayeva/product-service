@@ -4,55 +4,51 @@ import com.example.ecommerce_v2.mapper.ProductMapper;
 import com.example.ecommerce_v2.model.dto.Request.ProductRequestDto;
 import com.example.ecommerce_v2.model.dto.Response.ProductResponseDto;
 import com.example.ecommerce_v2.model.entity.Product;
+
+//import com.example.ecommerce_v2.repository.ProductCacheRepository;
 import com.example.ecommerce_v2.repository.ProductRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import org.springframework.data.redis.core.RedisTemplate;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class ProductService {
     private final ProductRepository repository;
+    //private final ProductCacheRepository cacheRepository;
     private final ProductMapper mapper;
+    private static final Logger log = LoggerFactory.getLogger(ProductService.class);
+    private static final String CACHE_PREFIX = "product:";
+    private static final long TTL = 10;
 
-//feign apisi
+    @Autowired
+    private RedisTemplate<String, Object> redisTemplate;
 
-public ProductResponseDto getProductById(Long id) {
-
-    log.info("Feign API: Getting product by id={}", id);
-
-    String key = "product:" + id;
-
-    // 1️⃣ Cache yoxla
-    ProductResponseDto cachedProduct =
-            (ProductResponseDto) redisTemplate.opsForValue().get(key);
-
-    if (cachedProduct != null) {
-        log.info("Product found in cache for id={}", id);
-        return cachedProduct;
+    public ProductService(ProductRepository repository, ProductMapper mapper) {
+        this.repository = repository;
+        this.mapper = mapper;
     }
 
-    // 2️⃣ DB-dən gətir (SƏNİN ORİJİNAL KODUN)
-    Product product = repository.findById(id)
-            .orElseThrow(() -> new RuntimeException("Not found"));
 
-    ProductResponseDto response = mapper.toResponseDto(product);
 
-    // 3️⃣ Cache-ə yaz (TTL ilə)
-    redisTemplate.opsForValue()
-            .set(key, response, 10, TimeUnit.MINUTES);
+    //feign apisi
+    public ProductResponseDto getProductById(Long id) {
+        log.info("Feign API: Getting product by id={}", id);
+        Product product = repository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Not found"));
 
-    log.info("Product cached for id={}", id);
-
-    return response;
-}
+        return mapper.toResponseDto(product);
+    }
 //crud apiler
     public ProductResponseDto save(ProductRequestDto dto) {
         log.info("Saving new product: {}", dto.getName());
@@ -62,15 +58,43 @@ public ProductResponseDto getProductById(Long id) {
     }
 
 
-    @Cacheable(
-            value = "products",
-            key = "#id"
-    )
+    //with cache-aside
     public ProductResponseDto getById(Long id) {
-        log.info("Getting product by id={} with cache", id);
-        Product product = repository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Product not found"));
-        return mapper.toResponseDto(product);
+        String key = CACHE_PREFIX + id;
+
+        ProductResponseDto cached = getFromCache(key);
+        if(cached != null){
+            return cached;
+        }
+
+        return getFromDb(id, key);
+
+    }
+
+    private ProductResponseDto getFromCache(String key){
+        ProductResponseDto cached = (ProductResponseDto) redisTemplate.opsForValue().get(key);
+        if (cached != null){
+            log.info("cache hit for key: {}", key);
+        }
+        else {
+            log.warn("cache miss for key: {}", key);
+        }
+        return cached;
+    }
+
+    private ProductResponseDto getFromDb(Long id, String key){
+        log.info("fetching from db. id: {}", id);
+
+        Product product= repository.findById(id)
+                .orElseThrow(() ->
+        { log.error("product not found in db. id: " , id);
+        return new RuntimeException("Product not found");
+        });
+        ProductResponseDto response = mapper.toResponseDto(product);
+
+        redisTemplate.opsForValue().set(key, response, TTL, TimeUnit.MINUTES);
+        log.info("Product cached. Key: {} , TTL: {} minutes", key, TTL);
+        return response;
     }
 
     public List<ProductResponseDto> getAll() {
@@ -106,4 +130,3 @@ public ProductResponseDto getProductById(Long id) {
     }
 
 }
-//create,get,update,delete
